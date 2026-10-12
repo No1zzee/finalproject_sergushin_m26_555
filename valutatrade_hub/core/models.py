@@ -8,6 +8,11 @@ from secrets import token_hex
 from string import hexdigits
 from typing import Self
 
+from valutatrade_hub.core.utils import (
+    USD_EXCHANGE_RATES,
+    normalize_currency_code,
+)
+
 MIN_PASSWORD_LENGTH = 4
 SALT_BYTES = 16
 SHA256_HEX_LENGTH = 64
@@ -164,14 +169,7 @@ class Wallet:
         balance: float = 0.0,
     ) -> None:
         """Создать кошелёк с указанной валютой и балансом."""
-        if not isinstance(currency_code, str):
-            raise TypeError("Код валюты должен быть строкой.")
-
-        currency_code = currency_code.strip().upper()
-        if not currency_code:
-            raise ValueError("Код валюты не может быть пустым.")
-
-        self._currency_code = currency_code
+        self._currency_code = normalize_currency_code(currency_code)
         self.balance = balance
 
     @staticmethod
@@ -241,4 +239,111 @@ class Wallet:
         return {
             "currency_code": self._currency_code,
             "balance": self._balance,
+        }
+
+
+class Portfolio:
+    """Портфель, объединяющий кошельки одного пользователя."""
+
+    def __init__(
+        self,
+        user_id: int,
+        user: User,
+        wallets: dict[str, Wallet] | None = None,
+    ) -> None:
+        """Создать портфель пользователя из переданных кошельков."""
+        if isinstance(user_id, bool) or not isinstance(user_id, int):
+            raise TypeError("Идентификатор должен быть целым числом.")
+
+        if not isinstance(user, User):
+            raise TypeError("Владелец портфеля должен быть объектом User.")
+
+        if user_id != user.user_id:
+            raise ValueError(
+                "Идентификатор портфеля не совпадает "
+                "с идентификатором пользователя."
+            )
+
+        if wallets is None:
+            wallets = {}
+
+        if not isinstance(wallets, dict):
+            raise TypeError("Кошельки должны быть переданы словарём.")
+
+        for currency_code, wallet in wallets.items():
+            if not isinstance(wallet, Wallet):
+                raise TypeError("Значениями словаря должны быть Wallet.")
+
+            if currency_code != wallet.currency_code:
+                raise ValueError(
+                    "Ключ словаря должен совпадать с кодом валюты кошелька."
+                )
+
+        self._user_id = user_id
+        self._user = user
+        self._wallets = wallets.copy()
+
+    @property
+    def user_id(self) -> int:
+        """Вернуть идентификатор владельца портфеля."""
+        return self._user_id
+
+    @property
+    def user(self) -> User:
+        """Вернуть пользователя, которому принадлежит портфель."""
+        return self._user
+
+    @property
+    def wallets(self) -> dict[str, Wallet]:
+        """Вернуть копию словаря кошельков."""
+        return self._wallets.copy()
+
+    def add_currency(self, currency_code: str) -> Wallet:
+        """Добавить кошелёк при отсутствии и вернуть его."""
+        currency_code = normalize_currency_code(currency_code)
+
+        if currency_code not in self._wallets:
+            self._wallets[currency_code] = Wallet(currency_code)
+
+        return self._wallets[currency_code]
+
+    def get_wallet(self, currency_code: str) -> Wallet:
+        """Вернуть кошелёк по коду валюты."""
+        currency_code = normalize_currency_code(currency_code)
+
+        if currency_code not in self._wallets:
+            raise KeyError(f"Кошелёк {currency_code} не найден.")
+
+        return self._wallets[currency_code]
+
+    def get_total_value(self, base_currency: str = "USD") -> float:
+        """Рассчитать стоимость портфеля по учебным курсам."""
+        base_currency = normalize_currency_code(base_currency)
+
+        if base_currency not in USD_EXCHANGE_RATES:
+            raise ValueError(f"Нет курса для валюты {base_currency}.")
+
+        total_usd = 0.0
+
+        for currency_code, wallet in self._wallets.items():
+            if currency_code not in USD_EXCHANGE_RATES:
+                raise ValueError(f"Нет курса для валюты {currency_code}.")
+
+            total_usd += wallet.balance * USD_EXCHANGE_RATES[currency_code]
+
+        total_value = total_usd / USD_EXCHANGE_RATES[base_currency]
+
+        if not isfinite(total_value):
+            raise ValueError("Общая стоимость портфеля слишком велика.")
+
+        return total_value
+
+    def to_dict(self) -> dict[str, object]:
+        """Подготовить данные портфеля для сохранения в JSON."""
+        return {
+            "user_id": self._user_id,
+            "wallets": {
+                currency_code: {"balance": wallet.balance}
+                for currency_code, wallet in self._wallets.items()
+            },
         }
