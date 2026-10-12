@@ -6,7 +6,9 @@ authors = [
     { name = "Mike", email = "MiKe36012@yandex.ru" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "prettytable>=3.18.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -17,3 +19,8 @@ valutatrade = "valutatrade_hub.cli.interface:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["valutatrade_hub"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.0",
+]
