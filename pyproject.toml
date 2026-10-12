@@ -3,7 +3,9 @@ name = "finalproject_sergushin_m26_555"
 version = "0.1.0"
 description = "Консольная платформа для симуляции торговли валютами"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "prettytable>=3.18.0",
+]
 
 [project.scripts]
 valutatrade = "valutatrade_hub.cli.interface:main"
@@ -26,3 +28,8 @@ select = ["E", "F", "W", "I", "B", "UP"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.0",
+]
