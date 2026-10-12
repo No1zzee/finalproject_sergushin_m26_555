@@ -1,0 +1,19 @@
+[project]
+name = "finalproject-sergushin-m26-555"
+version = "0.1.0"
+description = "Консольная платформа для симуляции торговли валютами"
+authors = [
+    { name = "Mike", email = "MiKe36012@yandex.ru" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+valutatrade = "valutatrade_hub.cli.interface:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["valutatrade_hub"]
