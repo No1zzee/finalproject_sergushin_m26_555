@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import compare_digest
+from math import isfinite
 from secrets import token_hex
 from string import hexdigits
 from typing import Self
@@ -151,4 +152,93 @@ class User:
             **self.get_user_info(),
             "hashed_password": self._hashed_password,
             "salt": self._salt,
+        }
+
+
+class Wallet:
+    """Кошелёк для хранения одной валюты."""
+
+    def __init__(
+        self,
+        currency_code: str,
+        balance: float = 0.0,
+    ) -> None:
+        """Создать кошелёк с указанной валютой и балансом."""
+        if not isinstance(currency_code, str):
+            raise TypeError("Код валюты должен быть строкой.")
+
+        currency_code = currency_code.strip().upper()
+        if not currency_code:
+            raise ValueError("Код валюты не может быть пустым.")
+
+        self._currency_code = currency_code
+        self.balance = balance
+
+    @staticmethod
+    def _validate_number(
+        value: float,
+        *,
+        allow_zero: bool = False,
+    ) -> float:
+        """Проверить число и допустимость нулевого значения."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("Значение должно быть числом.")
+
+        try:
+            value = float(value)
+        except OverflowError as error:
+            raise ValueError("Слишком большое числовое значение.") from error
+
+        if not isfinite(value):
+            raise ValueError("Значение должно быть конечным числом.")
+
+        if value < 0:
+            raise ValueError("Значение не может быть отрицательным.")
+
+        if value == 0 and not allow_zero:
+            raise ValueError("Сумма должна быть больше нуля.")
+
+        return value
+
+    @property
+    def currency_code(self) -> str:
+        """Вернуть код валюты кошелька."""
+        return self._currency_code
+
+    @property
+    def balance(self) -> float:
+        """Вернуть текущий баланс."""
+        return self._balance
+
+    @balance.setter
+    def balance(self, value: float) -> None:
+        """Установить неотрицательный числовой баланс."""
+        self._balance = self._validate_number(value, allow_zero=True)
+
+    def deposit(self, amount: float) -> None:
+        """Пополнить кошелёк на положительную сумму."""
+        amount = self._validate_number(amount)
+        self.balance = self._balance + amount
+
+    def withdraw(self, amount: float) -> None:
+        """Снять положительную сумму при достаточном балансе."""
+        amount = self._validate_number(amount)
+
+        if amount > self._balance:
+            raise ValueError(
+                f"Недостаточно средств: доступно {self._balance} "
+                f"{self._currency_code}, требуется {amount}."
+            )
+
+        self.balance = self._balance - amount
+
+    def get_balance_info(self) -> str:
+        """Вернуть информацию о валюте и текущем балансе."""
+        return f"{self._currency_code}: {self._balance}"
+
+    def to_dict(self) -> dict[str, str | float]:
+        """Подготовить данные кошелька для сохранения в JSON."""
+        return {
+            "currency_code": self._currency_code,
+            "balance": self._balance,
         }
