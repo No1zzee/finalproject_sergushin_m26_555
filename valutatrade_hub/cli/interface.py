@@ -5,8 +5,16 @@ import shlex
 
 from prettytable import PrettyTable
 
+from valutatrade_hub.core.currencies import get_supported_codes
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.usecases import TradingService
 from valutatrade_hub.infra.database import DatabaseManager
+from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.logging_config import setup_logging
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -39,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     portfolio_parser.add_argument(
         "--base",
-        default="USD",
+        default=SettingsLoader().get("default_base_currency"),
         help="Базовая валюта для расчёта стоимости",
     )
 
@@ -135,7 +143,13 @@ def _print_trade(result: dict) -> None:
 
 def main() -> None:
     """Запустить приложение и обработку пользовательских команд."""
-    service = TradingService(DatabaseManager())
+    try:
+        setup_logging()
+        service = TradingService(DatabaseManager())
+        parser = _build_parser()
+    except (OSError, TypeError, ValueError, RuntimeError) as error:
+        print(f"Ошибка запуска: {error}")
+        raise SystemExit(1) from error
     parser = _build_parser()
 
     print("ValutaTrade Hub. Для списка команд введите help.")
@@ -214,5 +228,14 @@ def main() -> None:
         except (EOFError, KeyboardInterrupt):
             print("\nРабота завершена.")
             break
+        except InsufficientFundsError as error:
+            print(str(error))
+        except CurrencyNotFoundError as error:
+            print(str(error))
+            print("Поддерживаемые валюты: " + ", ".join(get_supported_codes()))
+            print("Справка: get-rate --help")
+        except ApiRequestError as error:
+            print(str(error))
+            print("Повторите позже или проверьте подключение к сети.")
         except (OSError, TypeError, ValueError, RuntimeError) as error:
             print(f"Ошибка: {error}")
