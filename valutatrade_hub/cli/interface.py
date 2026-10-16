@@ -3,6 +3,8 @@
 import argparse
 import shlex
 
+from prettytable import PrettyTable
+
 from valutatrade_hub.core.usecases import TradingService
 from valutatrade_hub.infra.database import DatabaseManager
 
@@ -31,6 +33,33 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Пароль пользователя",
         )
 
+    portfolio_parser = commands.add_parser(
+        "show-portfolio",
+        help="Показать кошельки и стоимость портфеля",
+    )
+    portfolio_parser.add_argument(
+        "--base",
+        default="USD",
+        help="Базовая валюта для расчёта стоимости",
+    )
+
+    for name, description in (
+        ("buy", "Купить валюту"),
+        ("sell", "Продать валюту"),
+    ):
+        trade_parser = commands.add_parser(name, help=description)
+        trade_parser.add_argument(
+            "--currency",
+            required=True,
+            help="Код валюты",
+        )
+        trade_parser.add_argument(
+            "--amount",
+            type=float,
+            required=True,
+            help="Количество валюты",
+        )
+
     rate_parser = commands.add_parser(
         "get-rate",
         help="Получить курс одной валюты к другой",
@@ -52,6 +81,56 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser("exit", help="Завершить работу")
 
     return parser
+
+
+def _print_portfolio(result: dict) -> None:
+    """Вывести подготовленные сервисом данные портфеля."""
+    base_currency = result["base_currency"]
+
+    print(
+        f"Портфель пользователя '{result['username']}' "
+        f"(база: {base_currency}):"
+    )
+
+    if not result["wallets"]:
+        print("Кошельков пока нет.")
+        return
+
+    table = PrettyTable()
+    table.field_names = [
+        "Валюта",
+        "Баланс",
+        f"Стоимость, {base_currency}",
+    ]
+    table.align = "r"
+    table.align["Валюта"] = "l"
+
+    for wallet in result["wallets"]:
+        table.add_row(
+            [
+                wallet["currency"],
+                f"{wallet['balance']:.8f}",
+                f"{wallet['value']:,.2f}",
+            ]
+        )
+
+    print(table)
+    print(f"ИТОГО: {result['total']:,.2f} {base_currency}")
+
+
+def _print_trade(result: dict) -> None:
+    """Вывести результат покупки или продажи."""
+    operation = "Продажа" if result["operation"] == "sell" else "Покупка"
+    currency_code = result["currency"]
+
+    print(f"{operation} выполнена: {result['amount']:.8f} {currency_code}")
+    print(f"Курс: {result['rate']:.8f} USD/{currency_code}")
+    print(
+        f"Баланс {currency_code}: "
+        f"было {result['before']:.8f} "
+        f"→ стало {result['after']:.8f}"
+    )
+    print(f"Справочная стоимость операции: {result['value_usd']:,.2f} USD")
 
 
 def main() -> None:
@@ -93,6 +172,24 @@ def main() -> None:
                     arguments.password,
                 )
                 print(f"Вы вошли как '{user.username}'.")
+
+            elif arguments.command == "show-portfolio":
+                result = service.show_portfolio(arguments.base)
+                _print_portfolio(result)
+
+            elif arguments.command == "buy":
+                result = service.buy(
+                    arguments.currency,
+                    arguments.amount,
+                )
+                _print_trade(result)
+
+            elif arguments.command == "sell":
+                result = service.sell(
+                    arguments.currency,
+                    arguments.amount,
+                )
+                _print_trade(result)
 
             elif arguments.command == "get-rate":
                 result = service.get_rate(
