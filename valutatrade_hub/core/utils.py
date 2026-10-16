@@ -6,13 +6,6 @@ from math import isfinite
 MIN_CURRENCY_CODE_LENGTH = 2
 MAX_CURRENCY_CODE_LENGTH = 5
 
-USD_EXCHANGE_RATES = {
-    "USD": 1.0,
-    "EUR": 1.1,
-    "BTC": 60000.0,
-    "ETH": 3000.0,
-}
-
 
 def normalize_currency_code(currency_code: str) -> str:
     """Нормализовать код валюты и проверить его формат."""

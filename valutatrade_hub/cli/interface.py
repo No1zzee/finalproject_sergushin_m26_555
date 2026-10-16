@@ -15,6 +15,7 @@ from valutatrade_hub.core.usecases import TradingService
 from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
 from valutatrade_hub.logging_config import setup_logging
+from valutatrade_hub.parser_service.updater import build_updater
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -84,6 +85,33 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Целевая валюта",
     )
+    update_parser = commands.add_parser(
+        "update-rates",
+        help="Обновить курсы из внешних API",
+    )
+    update_parser.add_argument(
+        "--source",
+        choices=("coingecko", "exchangerate"),
+        help="Обновить только выбранный источник",
+    )
+
+    show_parser = commands.add_parser(
+        "show-rates",
+        help="Показать сохранённые курсы",
+    )
+    show_parser.add_argument(
+        "--currency",
+        help="Показать только указанную валюту",
+    )
+    show_parser.add_argument(
+        "--top",
+        type=int,
+        help="Показать N самых дорогих криптовалют",
+    )
+    show_parser.add_argument(
+        "--base",
+        help="Базовая валюта для пересчёта курсов",
+    )
 
     commands.add_parser("help", help="Показать список команд")
     commands.add_parser("exit", help="Завершить работу")
@@ -141,8 +169,43 @@ def _print_trade(result: dict) -> None:
     print(f"Справочная стоимость операции: {result['value_usd']:,.2f} USD")
 
 
+def _print_rates(result: dict) -> None:
+    """Вывести сохранённые курсы и статус их свежести."""
+    base_currency = result["base_currency"]
+
+    print(
+        "Курсы из локального кеша. Последнее обновление: "
+        f"{result['last_refresh']}"
+    )
+
+    table = PrettyTable()
+    table.field_names = [
+        "Пара",
+        "Курс",
+        "Обновлено UTC",
+        "Источник",
+        "Статус",
+    ]
+
+    for row in result["rows"]:
+        table.add_row(
+            [
+                f"{row['currency']}_{base_currency}",
+                f"{row['rate']:.8f}",
+                row["updated_at"],
+                row["source"],
+                "устарел" if row["stale"] else "свежий",
+            ]
+        )
+
+    print(table)
+
+    if any(row["stale"] for row in result["rows"]):
+        print("Для обновления устаревших курсов выполните update-rates.")
+
+
 def main() -> None:
-    """Запустить приложение и обработку пользовательских команд."""
+    """Запустить приложение и обработать пользовательские команды."""
     try:
         setup_logging()
         service = TradingService(DatabaseManager())
@@ -150,7 +213,6 @@ def main() -> None:
     except (OSError, TypeError, ValueError, RuntimeError) as error:
         print(f"Ошибка запуска: {error}")
         raise SystemExit(1) from error
-    parser = _build_parser()
 
     print("ValutaTrade Hub. Для списка команд введите help.")
 
@@ -188,39 +250,63 @@ def main() -> None:
                 print(f"Вы вошли как '{user.username}'.")
 
             elif arguments.command == "show-portfolio":
-                result = service.show_portfolio(arguments.base)
-                _print_portfolio(result)
+                _print_portfolio(service.show_portfolio(arguments.base))
 
             elif arguments.command == "buy":
-                result = service.buy(
-                    arguments.currency,
-                    arguments.amount,
+                _print_trade(
+                    service.buy(
+                        arguments.currency,
+                        arguments.amount,
+                    )
                 )
-                _print_trade(result)
 
             elif arguments.command == "sell":
-                result = service.sell(
-                    arguments.currency,
-                    arguments.amount,
+                _print_trade(
+                    service.sell(
+                        arguments.currency,
+                        arguments.amount,
+                    )
                 )
-                _print_trade(result)
 
             elif arguments.command == "get-rate":
                 result = service.get_rate(
                     arguments.from_currency,
                     arguments.to_currency,
                 )
-                updated_at = result["updated_at"].replace("T", " ")
-
                 print(
                     f"Курс {result['from_currency']}→"
                     f"{result['to_currency']}: {result['rate']:.8f} "
-                    f"(обновлено: {updated_at})"
+                    f"(обновлено: {result['updated_at']})"
                 )
                 print(
                     f"Обратный курс {result['to_currency']}→"
                     f"{result['from_currency']}: "
                     f"{result['inverse_rate']:.8f}"
+                )
+
+            elif arguments.command == "update-rates":
+                result = build_updater(arguments.source).run_update()
+
+                status = (
+                    "с предупреждениями" if result["warnings"] else "успешно"
+                )
+                print(
+                    f"Обновление завершено {status}. "
+                    f"Обновлено пар: {result['updated']}. "
+                    f"Добавлено измерений: {result['history_added']}."
+                )
+                print(f"Последнее обновление: {result['last_refresh']}")
+
+                for warning in result["warnings"]:
+                    print(warning)
+
+            elif arguments.command == "show-rates":
+                _print_rates(
+                    service.show_rates(
+                        arguments.currency,
+                        arguments.top,
+                        arguments.base,
+                    )
                 )
 
         except SystemExit:
@@ -236,6 +322,10 @@ def main() -> None:
             print("Справка: get-rate --help")
         except ApiRequestError as error:
             print(str(error))
-            print("Повторите позже или проверьте подключение к сети.")
+            print(
+                "Для загрузки курсов выполните update-rates. "
+                "Если обновление не удалось, проверьте "
+                "подключение и настройки API."
+            )
         except (OSError, TypeError, ValueError, RuntimeError) as error:
             print(f"Ошибка: {error}")
