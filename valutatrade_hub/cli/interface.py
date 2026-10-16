@@ -31,6 +31,23 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Пароль пользователя",
         )
 
+    rate_parser = commands.add_parser(
+        "get-rate",
+        help="Получить курс одной валюты к другой",
+    )
+    rate_parser.add_argument(
+        "--from",
+        dest="from_currency",
+        required=True,
+        help="Исходная валюта",
+    )
+    rate_parser.add_argument(
+        "--to",
+        dest="to_currency",
+        required=True,
+        help="Целевая валюта",
+    )
+
     commands.add_parser("help", help="Показать список команд")
     commands.add_parser("exit", help="Завершить работу")
 
@@ -42,7 +59,7 @@ def main() -> None:
     service = TradingService(DatabaseManager())
     parser = _build_parser()
 
-    print("ValutaTrade Hub. Доступны команды: register, login, help, exit.")
+    print("ValutaTrade Hub. Для списка команд введите help.")
 
     while True:
         try:
@@ -76,6 +93,24 @@ def main() -> None:
                     arguments.password,
                 )
                 print(f"Вы вошли как '{user.username}'.")
+
+            elif arguments.command == "get-rate":
+                result = service.get_rate(
+                    arguments.from_currency,
+                    arguments.to_currency,
+                )
+                updated_at = result["updated_at"].replace("T", " ")
+
+                print(
+                    f"Курс {result['from_currency']}→"
+                    f"{result['to_currency']}: {result['rate']:.8f} "
+                    f"(обновлено: {updated_at})"
+                )
+                print(
+                    f"Обратный курс {result['to_currency']}→"
+                    f"{result['from_currency']}: "
+                    f"{result['inverse_rate']:.8f}"
+                )
 
         except SystemExit:
             continue
