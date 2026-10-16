@@ -8,9 +8,14 @@ from secrets import token_hex
 from string import hexdigits
 from typing import Self
 
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.utils import (
     USD_EXCHANGE_RATES,
-    normalize_currency_code,
+    convert_amount,
 )
 
 MIN_PASSWORD_LENGTH = 4
@@ -169,7 +174,7 @@ class Wallet:
         balance: float = 0.0,
     ) -> None:
         """Создать кошелёк с указанной валютой и балансом."""
-        self._currency_code = normalize_currency_code(currency_code)
+        self._currency_code = get_currency(currency_code).code
         self.balance = balance
 
     @staticmethod
@@ -223,9 +228,10 @@ class Wallet:
         amount = self._validate_number(amount)
 
         if amount > self._balance:
-            raise ValueError(
-                f"Недостаточно средств: доступно {self._balance} "
-                f"{self._currency_code}, требуется {amount}."
+            raise InsufficientFundsError(
+                available=self._balance,
+                required=amount,
+                code=self._currency_code,
             )
 
         self.balance = self._balance - amount
@@ -300,7 +306,7 @@ class Portfolio:
 
     def add_currency(self, currency_code: str) -> Wallet:
         """Добавить кошелёк при отсутствии и вернуть его."""
-        currency_code = normalize_currency_code(currency_code)
+        currency_code = get_currency(currency_code).code
 
         if currency_code not in self._wallets:
             self._wallets[currency_code] = Wallet(currency_code)
@@ -309,7 +315,7 @@ class Portfolio:
 
     def get_wallet(self, currency_code: str) -> Wallet:
         """Вернуть кошелёк по коду валюты."""
-        currency_code = normalize_currency_code(currency_code)
+        currency_code = get_currency(currency_code).code
 
         if currency_code not in self._wallets:
             raise KeyError(f"Кошелёк {currency_code} не найден.")
@@ -318,25 +324,23 @@ class Portfolio:
 
     def get_total_value(self, base_currency: str = "USD") -> float:
         """Рассчитать стоимость портфеля по учебным курсам."""
-        base_currency = normalize_currency_code(base_currency)
+        base_currency = get_currency(base_currency).code
 
-        if base_currency not in USD_EXCHANGE_RATES:
-            raise ValueError(f"Нет курса для валюты {base_currency}.")
+        try:
+            base_rate = USD_EXCHANGE_RATES[base_currency]
+            total_usd = sum(
+                convert_amount(
+                    wallet.balance,
+                    USD_EXCHANGE_RATES[currency_code],
+                )
+                for currency_code, wallet in self._wallets.items()
+            )
+        except KeyError as error:
+            raise ApiRequestError(
+                f"Нет учебного курса для валюты {error.args[0]}."
+            ) from error
 
-        total_usd = 0.0
-
-        for currency_code, wallet in self._wallets.items():
-            if currency_code not in USD_EXCHANGE_RATES:
-                raise ValueError(f"Нет курса для валюты {currency_code}.")
-
-            total_usd += wallet.balance * USD_EXCHANGE_RATES[currency_code]
-
-        total_value = total_usd / USD_EXCHANGE_RATES[base_currency]
-
-        if not isfinite(total_value):
-            raise ValueError("Общая стоимость портфеля слишком велика.")
-
-        return total_value
+        return convert_amount(total_usd, 1.0 / base_rate)
 
     def to_dict(self) -> dict[str, object]:
         """Подготовить данные портфеля для сохранения в JSON."""
