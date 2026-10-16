@@ -3,25 +3,56 @@
 import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Self
 
 from valutatrade_hub.infra.settings import (
-    DATA_DIR,
     PORTFOLIOS_FILE,
     RATES_FILE,
     USERS_FILE,
+    SettingsLoader,
 )
 
 
 class DatabaseManager:
     """Управлять JSON-файлами пользователей, портфелей и курсов."""
 
+    _instance = None
+
+    def __new__(cls, data_dir: Path | None = None) -> Self:
+        """Вернуть единственный экземпляр хранилища."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+
+        return cls._instance
+
     def __init__(self, data_dir: Path | None = None) -> None:
-        """Запомнить каталог хранения данных."""
-        self._data_dir = (
-            Path(DATA_DIR if data_dir is None else data_dir)
-            .expanduser()
-            .resolve()
-        )
+        """Запомнить пути и запретить повторную смену каталога."""
+        if getattr(self, "_initialized", False):
+            if data_dir is not None:
+                requested = Path(data_dir).expanduser().resolve()
+
+                if requested != self._data_dir:
+                    raise ValueError(
+                        "DatabaseManager уже использует другой каталог. "
+                        "Для смены каталога перезапустите приложение."
+                    )
+
+            return
+
+        settings = SettingsLoader()
+        configured = settings.get("data_dir") if data_dir is None else data_dir
+
+        self._data_dir = Path(configured).expanduser().resolve()
+        self._file_names = {
+            USERS_FILE: settings.get("users_file"),
+            PORTFOLIOS_FILE: settings.get("portfolios_file"),
+            RATES_FILE: settings.get("rates_file"),
+        }
+        self._initialized = True
+
+    def _path(self, file_name: str) -> Path:
+        """Получить путь по проверенному логическому имени файла."""
+        return self._data_dir / self._file_names[file_name]
 
     @staticmethod
     def _empty_data(file_name: str) -> list | dict:
@@ -37,7 +68,7 @@ class DatabaseManager:
     def read_json(self, file_name: str) -> list | dict:
         """Прочитать данные, проверив корректность JSON и его тип."""
         default_data = self._empty_data(file_name)
-        path = self._data_dir / file_name
+        path = self._path(file_name)
 
         try:
             with path.open("r", encoding="utf-8") as file:
@@ -69,7 +100,7 @@ class DatabaseManager:
         )
 
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        path = self._data_dir / file_name
+        path = self._path(file_name)
         temporary_path = None
 
         try:
