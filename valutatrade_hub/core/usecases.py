@@ -3,15 +3,20 @@
 from datetime import UTC, datetime
 from math import isfinite
 
-from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.currencies import (
+    CryptoCurrency,
+    get_currency,
+    get_supported_codes,
+)
 from valutatrade_hub.core.exceptions import (
     ApiRequestError,
     InsufficientFundsError,
 )
 from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
-    USD_EXCHANGE_RATES,
     convert_amount,
+    parse_utc,
+    validate_rate,
 )
 from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.database import DatabaseManager
@@ -24,143 +29,275 @@ from valutatrade_hub.infra.settings import (
 
 
 class RateService:
-    """Получать курсы валют и проверять срок действия кеша."""
+    """Читать курсы только из локального кеша Parser Service."""
 
     def __init__(self, database: DatabaseManager) -> None:
-        """Подключить хранилище и общую конфигурацию."""
+        """Подключить хранилище и настройки свежести."""
         self._database = database
         self._settings = SettingsLoader()
+
+    def _read_cache(self) -> tuple[dict, dict]:
+        """Прочитать один снимок кеша."""
+        cache = self._database.read_json(RATES_FILE)
+        pairs = cache.get("pairs")
+
+        if not isinstance(pairs, dict):
+            raise ValueError("Поле pairs должно быть словарём.")
+
+        return cache, pairs
+
+    @staticmethod
+    def _identity(now: datetime) -> dict:
+        """Вернуть тождественный курс валюты к самой себе."""
+        return {
+            "rate": 1.0,
+            "updated_at": now.isoformat().replace("+00:00", "Z"),
+            "source": "Identity",
+            "stale": False,
+        }
 
     def _cached_entry(
         self,
         pairs: dict,
         pair_key: str,
         now: datetime,
+        *,
+        allow_stale: bool = False,
     ) -> dict | None:
-        """Вернуть корректную свежую запись или None."""
+        """Проверить запись и при необходимости её свежесть."""
         if pair_key not in pairs:
             return None
 
         entry = pairs[pair_key]
         if not isinstance(entry, dict):
-            raise ValueError(
-                f"Некорректная запись курса {pair_key} в rates.json."
-            )
+            raise ValueError(f"Некорректная запись курса {pair_key}.")
 
-        value = entry.get("rate")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"Некорректный курс в паре {pair_key}.")
+        source = entry.get("source")
+        if source == "Stub":
+            return None
 
-        try:
-            rate = float(value)
-            inverse_rate = 1.0 / rate
-            updated_at = datetime.fromisoformat(entry["updated_at"])
-        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
-            raise ValueError(
-                f"Некорректная запись курса {pair_key} в rates.json."
-            ) from error
-
-        if not isfinite(rate) or rate <= 0 or not isfinite(inverse_rate):
-            raise ValueError(f"Некорректный курс в паре {pair_key}.")
-
-        source = entry.get("source", "Cache")
         if not isinstance(source, str) or not source.strip():
-            raise ValueError(f"Некорректный источник курса {pair_key}.")
+            raise ValueError(f"Не указан источник курса {pair_key}.")
 
-        if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=UTC)
-
-        updated_at = updated_at.astimezone(UTC)
+        rate = validate_rate(entry.get("rate"))
+        updated_at = parse_utc(entry.get("updated_at"))
         age = (now - updated_at).total_seconds()
+        stale = not 0 <= age < self._settings.get("rates_ttl_seconds")
 
-        if not 0 <= age < self._settings.get("rates_ttl_seconds"):
+        if stale and not allow_stale:
             return None
 
         return {
             "rate": rate,
-            "updated_at": updated_at.isoformat(),
+            "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
             "source": source,
+            "stale": stale,
         }
 
-    @staticmethod
-    def _fetch_rate(from_currency: str, to_currency: str) -> float:
-        """Получить учебный курс до подключения Parser Service."""
-        try:
-            rate = (
-                USD_EXCHANGE_RATES[from_currency]
-                / USD_EXCHANGE_RATES[to_currency]
-            )
-        except (KeyError, ArithmeticError) as error:
-            raise ApiRequestError(
-                f"Курс {from_currency}→{to_currency} недоступен."
-            ) from error
+    def _pair_entry(
+        self,
+        pairs: dict,
+        from_currency: str,
+        to_currency: str,
+        now: datetime,
+        *,
+        allow_stale: bool = False,
+    ) -> dict | None:
+        """Найти прямой или обратный курс в одном снимке."""
+        candidates = []
 
-        if rate <= 0 or not isfinite(rate) or not isfinite(1.0 / rate):
-            raise ApiRequestError(
-                f"Источник вернул некорректный курс "
-                f"{from_currency}→{to_currency}."
+        for pair_key, inverse in (
+            (f"{from_currency}_{to_currency}", False),
+            (f"{to_currency}_{from_currency}", True),
+        ):
+            entry = self._cached_entry(
+                pairs,
+                pair_key,
+                now,
+                allow_stale=allow_stale,
+            )
+            if entry is None:
+                continue
+
+            candidates.append(
+                {
+                    **entry,
+                    "rate": (
+                        1.0 / entry["rate"] if inverse else entry["rate"]
+                    ),
+                }
             )
 
-        return rate
+        if not candidates:
+            return None
+
+        return max(
+            candidates,
+            key=lambda entry: (
+                not entry["stale"],
+                parse_utc(entry["updated_at"]),
+            ),
+        )
+
+    def _usd_entry(
+        self,
+        pairs: dict,
+        code: str,
+        now: datetime,
+        *,
+        allow_stale: bool = False,
+    ) -> dict | None:
+        """Получить запись о стоимости валюты в USD."""
+        if code == "USD":
+            return self._identity(now)
+
+        return self._pair_entry(
+            pairs,
+            code,
+            "USD",
+            now,
+            allow_stale=allow_stale,
+        )
 
     def get_rate(self, from_currency: str, to_currency: str) -> dict:
-        """Получить проверенный курс из кеша или учебного источника."""
+        """Получить свежий прямой, обратный или кросс-курс."""
         from_currency = get_currency(from_currency).code
         to_currency = get_currency(to_currency).code
         now = datetime.now(UTC)
 
         if from_currency == to_currency:
-            return {
-                "from_currency": from_currency,
-                "to_currency": to_currency,
-                "rate": 1.0,
-                "inverse_rate": 1.0,
-                "updated_at": now.isoformat(),
-                "source": "Identity",
-            }
+            entry = self._identity(now)
+        else:
+            _cache, pairs = self._read_cache()
+            entry = self._pair_entry(
+                pairs,
+                from_currency,
+                to_currency,
+                now,
+            )
 
-        cache = self._database.read_json(RATES_FILE)
-        pairs = cache.get("pairs")
+            if entry is None:
+                left = self._usd_entry(pairs, from_currency, now)
+                right = self._usd_entry(pairs, to_currency, now)
 
-        if not isinstance(pairs, dict):
-            raise ValueError("В rates.json поле 'pairs' должно быть словарём.")
+                if left is None or right is None:
+                    raise ApiRequestError(
+                        f"Курс {from_currency}→{to_currency} "
+                        "отсутствует или устарел. "
+                        "Выполните update-rates."
+                    )
 
-        pair_key = f"{from_currency}_{to_currency}"
-        reverse_key = f"{to_currency}_{from_currency}"
-
-        entry = self._cached_entry(pairs, pair_key, now)
-        is_reverse = False
-
-        if entry is None:
-            entry = self._cached_entry(pairs, reverse_key, now)
-            is_reverse = True
-
-        if entry is None:
-            rate = self._fetch_rate(from_currency, to_currency)
-
-            entry = {
-                "rate": rate,
-                "updated_at": now.isoformat(),
-                "source": "Stub",
-            }
-            pairs[pair_key] = entry
-            cache["last_refresh"] = entry["updated_at"]
-            self._database.write_json(RATES_FILE, cache)
-            is_reverse = False
-
-        rate = entry["rate"]
-        inverse_rate = 1.0 / rate
-
-        if is_reverse:
-            rate, inverse_rate = inverse_rate, rate
+                entry = {
+                    "rate": validate_rate(left["rate"] / right["rate"]),
+                    "updated_at": min(
+                        left["updated_at"],
+                        right["updated_at"],
+                        key=parse_utc,
+                    ),
+                    "source": " + ".join(
+                        sorted({left["source"], right["source"]})
+                    ),
+                    "stale": False,
+                }
 
         return {
             "from_currency": from_currency,
             "to_currency": to_currency,
-            "rate": rate,
-            "inverse_rate": inverse_rate,
-            "updated_at": entry["updated_at"],
-            "source": entry["source"],
+            **entry,
+            "inverse_rate": 1.0 / entry["rate"],
+        }
+
+    def show_rates(
+        self,
+        currency: str | None = None,
+        top: int | None = None,
+        base_currency: str | None = None,
+    ) -> dict:
+        """Подготовить список курсов с явным статусом свежести."""
+        if top is not None and (
+            isinstance(top, bool) or not isinstance(top, int) or top <= 0
+        ):
+            raise ValueError("Параметр top должен быть положительным целым.")
+
+        if currency is not None:
+            currency = get_currency(currency).code
+
+        if base_currency is None:
+            base_currency = self._settings.get("default_base_currency")
+
+        base_currency = get_currency(base_currency).code
+        cache, pairs = self._read_cache()
+
+        if not pairs:
+            raise ValueError(
+                "Локальный кеш курсов пуст. Выполните update-rates."
+            )
+
+        now = datetime.now(UTC)
+        base = self._usd_entry(pairs, base_currency, now)
+
+        if base is None:
+            raise ApiRequestError(
+                f"Свежий курс базовой валюты {base_currency} "
+                "отсутствует. Выполните update-rates."
+            )
+
+        codes = (currency,) if currency else get_supported_codes()
+        rows = []
+
+        for code in codes:
+            if currency is None and code == "USD":
+                continue
+
+            if top is not None and not isinstance(
+                get_currency(code), CryptoCurrency
+            ):
+                continue
+
+            entry = self._usd_entry(
+                pairs,
+                code,
+                now,
+                allow_stale=True,
+            )
+            if entry is None:
+                continue
+
+            source = entry["source"]
+            if base_currency != "USD":
+                source = " + ".join(sorted({source, base["source"]}))
+
+            rows.append(
+                {
+                    "currency": code,
+                    "rate": validate_rate(entry["rate"] / base["rate"]),
+                    "updated_at": min(
+                        entry["updated_at"],
+                        base["updated_at"],
+                        key=parse_utc,
+                    ),
+                    "source": source,
+                    "stale": entry["stale"],
+                }
+            )
+
+        if not rows:
+            if currency:
+                raise ValueError(f"Курс для '{currency}' не найден в кеше.")
+            raise ValueError(
+                "Подходящих курсов в кеше нет. Выполните update-rates."
+            )
+
+        if top is not None:
+            rows.sort(key=lambda row: (-row["rate"], row["currency"]))
+            rows = rows[:top]
+        else:
+            rows.sort(key=lambda row: row["currency"])
+
+        return {
+            "base_currency": base_currency,
+            "last_refresh": cache.get("last_refresh"),
+            "rows": rows,
         }
 
 
@@ -376,35 +513,38 @@ class TradingService:
         self,
         base_currency: str | None = None,
     ) -> dict:
-        """Подготовить кошельки и стоимость в выбранной валюте."""
+        """Оценить портфель по свежим курсам локального кеша."""
         portfolio, _records, _index = self._load_portfolio()
 
         if base_currency is None:
             base_currency = self._settings.get("default_base_currency")
 
         base_currency = get_currency(base_currency).code
-        base_rate = self._usd_rate(base_currency)
-
+        wallets = portfolio.wallets
         rows = []
-        total = 0.0
 
-        for currency_code, wallet in sorted(portfolio.wallets.items()):
-            if currency_code == base_currency:
-                rate = 1.0
-            else:
-                rate = self._usd_rate(currency_code) / base_rate
+        if not wallets:
+            return {
+                "username": portfolio.user.username,
+                "base_currency": base_currency,
+                "wallets": rows,
+                "total": 0.0,
+            }
 
-            value = convert_amount(wallet.balance, rate)
-            total += value
+        usd_rates = {
+            code: self._usd_rate(code) for code in {base_currency, *wallets}
+        }
+        base_rate = usd_rates[base_currency]
 
-            if not isfinite(total):
-                raise ValueError("Стоимость портфеля слишком велика.")
-
+        for currency_code, wallet in sorted(wallets.items()):
             rows.append(
                 {
                     "currency": currency_code,
                     "balance": wallet.balance,
-                    "value": value,
+                    "value": convert_amount(
+                        wallet.balance,
+                        usd_rates[currency_code] / base_rate,
+                    ),
                 }
             )
 
@@ -412,7 +552,10 @@ class TradingService:
             "username": portfolio.user.username,
             "base_currency": base_currency,
             "wallets": rows,
-            "total": total,
+            "total": portfolio.get_total_value(
+                base_currency,
+                usd_rates,
+            ),
         }
 
     @log_action("BUY", verbose=True)
@@ -471,3 +614,16 @@ class TradingService:
             "base": "USD",
             "value_usd": value_usd,
         }
+
+    def show_rates(
+        self,
+        currency: str | None = None,
+        top: int | None = None,
+        base_currency: str | None = None,
+    ) -> dict:
+        """Подготовить список сохранённых курсов для CLI."""
+        return self._rates.show_rates(
+            currency,
+            top,
+            base_currency,
+        )

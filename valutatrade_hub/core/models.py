@@ -9,14 +9,8 @@ from string import hexdigits
 from typing import Self
 
 from valutatrade_hub.core.currencies import get_currency
-from valutatrade_hub.core.exceptions import (
-    ApiRequestError,
-    InsufficientFundsError,
-)
-from valutatrade_hub.core.utils import (
-    USD_EXCHANGE_RATES,
-    convert_amount,
-)
+from valutatrade_hub.core.exceptions import InsufficientFundsError
+from valutatrade_hub.core.utils import convert_amount, validate_rate
 
 MIN_PASSWORD_LENGTH = 4
 SALT_BYTES = 16
@@ -322,25 +316,43 @@ class Portfolio:
 
         return self._wallets[currency_code]
 
-    def get_total_value(self, base_currency: str = "USD") -> float:
-        """Рассчитать стоимость портфеля по учебным курсам."""
+    def get_total_value(
+        self,
+        base_currency: str = "USD",
+        usd_rates: dict[str, float] | None = None,
+    ) -> float:
+        """Рассчитать стоимость по переданным курсам к USD."""
         base_currency = get_currency(base_currency).code
 
+        if not self._wallets:
+            return 0.0
+
+        if usd_rates is None:
+            usd_rates = {}
+
+        if not isinstance(usd_rates, dict):
+            raise TypeError("Курсы должны быть переданы словарём.")
+
+        rates = {**usd_rates, "USD": 1.0}
+
         try:
-            base_rate = USD_EXCHANGE_RATES[base_currency]
-            total_usd = sum(
+            base_rate = validate_rate(rates[base_currency])
+            total = sum(
                 convert_amount(
                     wallet.balance,
-                    USD_EXCHANGE_RATES[currency_code],
+                    validate_rate(rates[currency_code]) / base_rate,
                 )
                 for currency_code, wallet in self._wallets.items()
             )
         except KeyError as error:
-            raise ApiRequestError(
-                f"Нет учебного курса для валюты {error.args[0]}."
+            raise ValueError(
+                f"Не передан курс для валюты {error.args[0]}."
             ) from error
 
-        return convert_amount(total_usd, 1.0 / base_rate)
+        if not isfinite(total):
+            raise ValueError("Стоимость портфеля слишком велика.")
+
+        return total
 
     def to_dict(self) -> dict[str, object]:
         """Подготовить данные портфеля для сохранения в JSON."""
