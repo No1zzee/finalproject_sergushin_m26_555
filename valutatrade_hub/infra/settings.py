@@ -21,6 +21,7 @@ DEFAULT_SETTINGS = {
     "default_base_currency": "USD",
     "log_dir": "logs",
     "log_file": "actions.log",
+    "parser_log_file": "parser.log",
     "log_level": "INFO",
     "log_format": "json",
     "log_max_bytes": 1_048_576,
@@ -100,6 +101,7 @@ class SettingsLoader:
             "portfolios_file",
             "rates_file",
             "log_file",
+            "parser_log_file",
         )
 
         for key in file_keys:

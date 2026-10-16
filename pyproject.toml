@@ -36,6 +36,7 @@ dev = [
 ]
 
 [tool.valutatrade]
+parser_log_file = "parser.log"
 data_dir = "data"
 users_file = "users.json"
 portfolios_file = "portfolios.json"

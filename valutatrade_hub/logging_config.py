@@ -10,6 +10,7 @@ from pathlib import Path
 from valutatrade_hub.infra.settings import SettingsLoader
 
 LOGGER_NAME = "valutatrade.actions"
+PARSER_LOGGER_NAME = "valutatrade.parser"
 
 
 def _json_value(value: object) -> object:
@@ -51,29 +52,30 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
-    """Настроить журнал без накопления повторных обработчиков."""
+    """Настроить отдельные журналы операций и парсера."""
     settings = SettingsLoader()
+    log_dir = Path(settings.get("log_dir")).expanduser()
+    log_dir.mkdir(parents=True, exist_ok=True)
 
-    log_path = Path(settings.get("log_dir")).expanduser() / settings.get(
-        "log_file"
-    )
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    for logger_name, file_key in (
+        (LOGGER_NAME, "log_file"),
+        (PARSER_LOGGER_NAME, "parser_log_file"),
+    ):
+        handler = RotatingFileHandler(
+            log_dir / settings.get(file_key),
+            maxBytes=settings.get("log_max_bytes"),
+            backupCount=settings.get("log_backup_count"),
+            encoding="utf-8",
+            delay=True,
+        )
+        handler.setFormatter(JsonFormatter())
 
-    handler = RotatingFileHandler(
-        log_path,
-        maxBytes=settings.get("log_max_bytes"),
-        backupCount=settings.get("log_backup_count"),
-        encoding="utf-8",
-        delay=True,
-    )
-    handler.setFormatter(JsonFormatter())
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(settings.get("log_level"))
+        logger.propagate = False
 
-    logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(settings.get("log_level"))
-    logger.propagate = False
+        for previous_handler in logger.handlers[:]:
+            logger.removeHandler(previous_handler)
+            previous_handler.close()
 
-    for previous_handler in logger.handlers[:]:
-        logger.removeHandler(previous_handler)
-        previous_handler.close()
-
-    logger.addHandler(handler)
+        logger.addHandler(handler)
