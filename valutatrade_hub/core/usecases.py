@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from math import isfinite
 
-from valutatrade_hub.core.models import Portfolio, User
+from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
     USD_EXCHANGE_RATES,
     normalize_currency_code,
@@ -233,3 +233,209 @@ class TradingService:
     def get_rate(self, from_currency: str, to_currency: str) -> dict:
         """Получить курс валют без обязательного входа."""
         return self._rates.get_rate(from_currency, to_currency)
+
+    def _load_portfolio(self) -> tuple[Portfolio, list[dict], int]:
+        """Загрузить портфель вошедшего пользователя и исходные записи."""
+        user = self._current_user
+        if user is None:
+            raise ValueError("Сначала выполните login.")
+
+        records = self._database.read_json(PORTFOLIOS_FILE)
+        matches = []
+
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise ValueError(
+                    "В portfolios.json записи должны быть словарями."
+                )
+
+            record_id = record.get("user_id")
+            if (
+                isinstance(record_id, bool)
+                or not isinstance(record_id, int)
+                or record_id <= 0
+            ):
+                raise ValueError("Некорректный user_id в portfolios.json.")
+
+            if record_id == user.user_id:
+                matches.append(index)
+
+        if len(matches) != 1:
+            raise ValueError(
+                "В portfolios.json должен быть ровно один "
+                "портфель текущего пользователя."
+            )
+
+        index = matches[0]
+        raw_wallets = records[index].get("wallets")
+
+        if not isinstance(raw_wallets, dict):
+            raise ValueError(
+                "Поле 'wallets' в portfolios.json должно быть словарём."
+            )
+
+        wallets = {}
+
+        for currency_code, raw_wallet in raw_wallets.items():
+            if not isinstance(raw_wallet, dict) or "balance" not in raw_wallet:
+                raise ValueError(
+                    f"Некорректная запись кошелька '{currency_code}'."
+                )
+
+            wallet = Wallet(currency_code, raw_wallet["balance"])
+
+            if (
+                currency_code != wallet.currency_code
+                or raw_wallet.get("currency_code", currency_code)
+                != currency_code
+            ):
+                raise ValueError(
+                    f"Некорректный код кошелька '{currency_code}'."
+                )
+
+            wallets[currency_code] = wallet
+
+        portfolio = Portfolio(user.user_id, user, wallets)
+        return portfolio, records, index
+
+    def _save_portfolio(
+        self,
+        portfolio: Portfolio,
+        records: list[dict],
+        index: int,
+    ) -> None:
+        """Сохранить балансы, сохранив остальные данные JSON."""
+        record = records[index]
+
+        for currency_code, wallet in portfolio.wallets.items():
+            original_wallet = record["wallets"].get(currency_code, {})
+            record["wallets"][currency_code] = {
+                **original_wallet,
+                "balance": wallet.balance,
+            }
+
+        self._database.write_json(PORTFOLIOS_FILE, records)
+
+    @staticmethod
+    def _validate_amount(amount: float) -> float:
+        """Проверить положительную конечную сумму операции."""
+        message = "'amount' должен быть положительным конечным числом."
+
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise ValueError(message)
+
+        try:
+            amount = float(amount)
+        except OverflowError as error:
+            raise ValueError(message) from error
+
+        if not isfinite(amount) or amount <= 0:
+            raise ValueError(message)
+
+        return amount
+
+    def _usd_rate(self, currency_code: str) -> float:
+        """Получить стоимость единицы валюты в USD."""
+        if currency_code == "USD":
+            return 1.0
+
+        return self._rates.get_rate(currency_code, "USD")["rate"]
+
+    def show_portfolio(self, base_currency: str = "USD") -> dict:
+        """Подготовить кошельки и общую стоимость для вывода."""
+        portfolio, _records, _index = self._load_portfolio()
+        base_currency = normalize_currency_code(base_currency)
+
+        try:
+            base_rate = self._usd_rate(base_currency)
+        except ValueError as error:
+            raise ValueError(
+                "Неизвестная или недоступная базовая валюта "
+                f"'{base_currency}': {error}"
+            ) from error
+
+        rows = []
+        total = 0.0
+
+        for currency_code, wallet in sorted(portfolio.wallets.items()):
+            if currency_code == base_currency:
+                rate = 1.0
+            else:
+                rate = self._usd_rate(currency_code) / base_rate
+
+            value = wallet.balance * rate
+            total += value
+
+            if not isfinite(value) or not isfinite(total):
+                raise ValueError("Стоимость портфеля слишком велика.")
+
+            rows.append(
+                {
+                    "currency": currency_code,
+                    "balance": wallet.balance,
+                    "value": value,
+                }
+            )
+
+        return {
+            "username": portfolio.user.username,
+            "base_currency": base_currency,
+            "wallets": rows,
+            "total": total,
+        }
+
+    def buy(self, currency_code: str, amount: float) -> dict:
+        """Увеличить баланс валюты и сохранить портфель."""
+        return self._trade(currency_code, amount, is_sale=False)
+
+    def sell(self, currency_code: str, amount: float) -> dict:
+        """Уменьшить баланс валюты и сохранить портфель."""
+        return self._trade(currency_code, amount, is_sale=True)
+
+    def _trade(
+        self,
+        currency_code: str,
+        amount: float,
+        *,
+        is_sale: bool,
+    ) -> dict:
+        """Выполнить общие шаги покупки или продажи."""
+        portfolio, records, index = self._load_portfolio()
+        currency_code = normalize_currency_code(currency_code)
+        amount = self._validate_amount(amount)
+
+        if is_sale:
+            try:
+                wallet = portfolio.get_wallet(currency_code)
+            except KeyError:
+                raise ValueError(
+                    f"У вас нет кошелька '{currency_code}'. "
+                    "Он создаётся автоматически при первой покупке."
+                ) from None
+        else:
+            wallet = portfolio.add_currency(currency_code)
+
+        before = wallet.balance
+
+        if is_sale:
+            wallet.withdraw(amount)
+        else:
+            wallet.deposit(amount)
+
+        rate = self._usd_rate(currency_code)
+        value_usd = amount * rate
+
+        if not isfinite(value_usd):
+            raise ValueError("Стоимость операции слишком велика.")
+
+        self._save_portfolio(portfolio, records, index)
+
+        return {
+            "operation": "sell" if is_sale else "buy",
+            "currency": currency_code,
+            "amount": amount,
+            "before": before,
+            "after": wallet.balance,
+            "rate": rate,
+            "value_usd": value_usd,
+        }
